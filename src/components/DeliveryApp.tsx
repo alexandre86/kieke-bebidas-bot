@@ -5,6 +5,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
 import { 
   ShoppingCart, 
   Send, 
@@ -17,7 +20,10 @@ import {
   Phone,
   Minus,
   Plus,
-  X
+  X,
+  Settings,
+  Webhook,
+  Zap
 } from "lucide-react";
 
 // Tipos
@@ -71,7 +77,7 @@ const PRODUCTS: Product[] = [
 ];
 
 const DeliveryApp = () => {
-  const [currentView, setCurrentView] = useState<'chat' | 'products' | 'cart'>('chat');
+  const [currentView, setCurrentView] = useState<'chat' | 'products' | 'cart' | 'settings'>('chat');
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -92,8 +98,51 @@ const DeliveryApp = () => {
     changeFor: '',
   });
   const [orderNumber, setOrderNumber] = useState(1);
+  const [n8nSettings, setN8nSettings] = useState({
+    newOrderWebhook: localStorage.getItem('n8n_new_order_webhook') || '',
+    paymentWebhook: localStorage.getItem('n8n_payment_webhook') || '',
+    stockWebhook: localStorage.getItem('n8n_stock_webhook') || '',
+    enableN8n: localStorage.getItem('n8n_enabled') === 'true' || false,
+  });
 
-  // Função para adicionar produto ao carrinho
+  const { toast } = useToast();
+
+  // Função para salvar configurações do n8n
+  const saveN8nSettings = () => {
+    localStorage.setItem('n8n_new_order_webhook', n8nSettings.newOrderWebhook);
+    localStorage.setItem('n8n_payment_webhook', n8nSettings.paymentWebhook);
+    localStorage.setItem('n8n_stock_webhook', n8nSettings.stockWebhook);
+    localStorage.setItem('n8n_enabled', n8nSettings.enableN8n.toString());
+    
+    toast({
+      title: "Configurações salvas!",
+      description: "As integrações com n8n foram configuradas com sucesso.",
+    });
+  };
+
+  // Função para disparar webhook do n8n
+  const triggerN8nWebhook = async (webhookUrl: string, data: any) => {
+    if (!n8nSettings.enableN8n || !webhookUrl) return;
+
+    try {
+      await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        mode: "no-cors",
+        body: JSON.stringify({
+          ...data,
+          timestamp: new Date().toISOString(),
+          source: "deposito_do_keke",
+        }),
+      });
+      
+      console.log("Webhook n8n disparado:", webhookUrl);
+    } catch (error) {
+      console.error("Erro ao disparar webhook n8n:", error);
+    }
+  };
   const addToCart = (product: Product, quantity: number = 1) => {
     setCart(prev => {
       const existingItem = prev.find(item => item.id === product.id);
@@ -105,6 +154,14 @@ const DeliveryApp = () => {
         );
       }
       return [...prev, { ...product, quantity }];
+    });
+
+    // Disparar webhook de estoque
+    triggerN8nWebhook(n8nSettings.stockWebhook, {
+      action: 'product_added_to_cart',
+      product: product,
+      quantity: quantity,
+      cart_total_items: cart.reduce((total, item) => total + item.quantity, 0) + quantity,
     });
   };
 
@@ -126,7 +183,65 @@ const DeliveryApp = () => {
     );
   };
 
-  // Calcular total do carrinho
+  // Função para finalizar pedido
+  const handleFinishOrder = async () => {
+    const order = {
+      id: `#${orderNumber.toString().padStart(3, '0')}`,
+      items: cart,
+      total: cartTotal,
+      customer: customerInfo,
+      address: `${customerInfo.address}, ${customerInfo.number} - ${customerInfo.neighborhood}`,
+      paymentMethod: customerInfo.paymentMethod,
+      cardType: customerInfo.cardType,
+      changeFor: customerInfo.changeFor,
+      timestamp: new Date().toISOString(),
+      status: 'pending'
+    };
+
+    // Disparar webhook de novo pedido
+    await triggerN8nWebhook(n8nSettings.newOrderWebhook, {
+      action: 'new_order',
+      order: order,
+    });
+
+    // Disparar webhook de pagamento se necessário
+    if (customerInfo.paymentMethod === 'pix') {
+      await triggerN8nWebhook(n8nSettings.paymentWebhook, {
+        action: 'payment_pending',
+        order_id: order.id,
+        payment_method: 'pix',
+        amount: cartTotal,
+      });
+    }
+
+    toast({
+      title: "Pedido realizado com sucesso! 🎉",
+      description: `Pedido ${order.id} confirmado. ${customerInfo.paymentMethod === 'pix' ? 'Aguardando comprovante PIX.' : 'Preparando entrega!'}`,
+    });
+
+    // Limpar carrinho e informações
+    setCart([]);
+    setCustomerInfo({
+      name: '',
+      address: '',
+      neighborhood: '',
+      number: '',
+      paymentMethod: '',
+      cardType: '',
+      changeFor: '',
+    });
+    setOrderNumber(prev => prev + 1);
+    setCurrentView('chat');
+
+    // Adicionar mensagem no chat
+    const successMessage: Message = {
+      id: Date.now().toString(),
+      content: `✅ Perfeito! Seu pedido ${order.id} foi confirmado!\n\n📦 Total: R$ ${cartTotal.toFixed(2)}\n📍 Endereço: ${order.address}\n💳 Pagamento: ${customerInfo.paymentMethod === 'pix' ? 'PIX' : customerInfo.paymentMethod === 'card' ? `Cartão ${customerInfo.cardType}` : 'Dinheiro'}\n\n${customerInfo.paymentMethod === 'pix' ? '📸 Aguardando comprovante PIX para confirmar!' : '🛵 Já estamos preparando sua entrega!'}`,
+      isBot: true,
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, successMessage]);
+  };
   const cartTotal = cart.reduce((total, item) => total + (item.price * item.quantity), 0);
 
   // Função para enviar mensagem
@@ -267,6 +382,14 @@ const DeliveryApp = () => {
                     {cart.reduce((total, item) => total + item.quantity, 0)}
                   </Badge>
                 )}
+              </Button>
+              <Button
+                variant={currentView === 'settings' ? 'default' : 'ghost'}
+                size="sm"
+                onClick={() => setCurrentView('settings')}
+              >
+                <Settings className="h-4 w-4 mr-2" />
+                n8n
               </Button>
             </div>
           </div>
@@ -534,12 +657,157 @@ const DeliveryApp = () => {
                         size="lg"
                         variant="accent"
                         disabled={!customerInfo.address || !customerInfo.number || !customerInfo.neighborhood || !customerInfo.paymentMethod}
+                        onClick={handleFinishOrder}
                       >
                         Finalizar Pedido - R$ {cartTotal.toFixed(2)}
                       </Button>
                     </div>
                   </>
                 )}
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* Settings View - n8n Integration */}
+        {currentView === 'settings' && (
+          <div className="max-w-4xl mx-auto space-y-6">
+            <Card className="shadow-strong">
+              <div className="p-6">
+                <div className="flex items-center space-x-3 mb-6">
+                  <div className="h-12 w-12 gradient-accent rounded-lg flex items-center justify-center">
+                    <Zap className="h-6 w-6 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold">Integração n8n</h2>
+                    <p className="text-muted-foreground">Configure automações para seu delivery</p>
+                  </div>
+                </div>
+
+                <div className="space-y-6">
+                  <div className="flex items-center space-x-3">
+                    <Switch
+                      checked={n8nSettings.enableN8n}
+                      onCheckedChange={(checked) =>
+                        setN8nSettings(prev => ({ ...prev, enableN8n: checked }))
+                      }
+                      id="enable-n8n"
+                    />
+                    <Label htmlFor="enable-n8n" className="text-base font-medium">
+                      Ativar integrações n8n
+                    </Label>
+                  </div>
+
+                  {n8nSettings.enableN8n && (
+                    <div className="space-y-6 border-t border-border pt-6">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <div className="flex items-center space-x-2">
+                            <Webhook className="h-5 w-5 text-primary" />
+                            <h3 className="font-semibold">Webhook - Novos Pedidos</h3>
+                          </div>
+                          <Input
+                            placeholder="https://seu-n8n.com/webhook/novo-pedido"
+                            value={n8nSettings.newOrderWebhook}
+                            onChange={(e) =>
+                              setN8nSettings(prev => ({ ...prev, newOrderWebhook: e.target.value }))
+                            }
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Dispara quando um novo pedido é realizado. Útil para:
+                            • Enviar WhatsApp de confirmação
+                            • Salvar pedido no Google Sheets
+                            • Notificar equipe de entrega
+                          </p>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="flex items-center space-x-2">
+                            <Webhook className="h-5 w-5 text-secondary" />
+                            <h3 className="font-semibold">Webhook - Pagamentos</h3>
+                          </div>
+                          <Input
+                            placeholder="https://seu-n8n.com/webhook/pagamento"
+                            value={n8nSettings.paymentWebhook}
+                            onChange={(e) =>
+                              setN8nSettings(prev => ({ ...prev, paymentWebhook: e.target.value }))
+                            }
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Dispara em eventos de pagamento. Útil para:
+                            • Verificar PIX automaticamente
+                            • Confirmar pagamentos
+                            • Atualizar status do pedido
+                          </p>
+                        </div>
+
+                        <div className="space-y-4">
+                          <div className="flex items-center space-x-2">
+                            <Webhook className="h-5 w-5 text-accent" />
+                            <h3 className="font-semibold">Webhook - Estoque</h3>
+                          </div>
+                          <Input
+                            placeholder="https://seu-n8n.com/webhook/estoque"
+                            value={n8nSettings.stockWebhook}
+                            onChange={(e) =>
+                              setN8nSettings(prev => ({ ...prev, stockWebhook: e.target.value }))
+                            }
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            Dispara quando produtos são adicionados ao carrinho. Útil para:
+                            • Controle de estoque em tempo real
+                            • Alertas de produtos em falta
+                            • Relatórios de produtos mais vendidos
+                          </p>
+                        </div>
+
+                        <div className="space-y-4">
+                          <h3 className="font-semibold">Como configurar no n8n:</h3>
+                          <div className="bg-muted/50 p-4 rounded-lg space-y-2 text-sm">
+                            <p><strong>1.</strong> Crie um novo workflow no n8n</p>
+                            <p><strong>2.</strong> Adicione um nó "Webhook"</p>
+                            <p><strong>3.</strong> Configure o método como "POST"</p>
+                            <p><strong>4.</strong> Copie a URL do webhook</p>
+                            <p><strong>5.</strong> Cole aqui nos campos acima</p>
+                            <p><strong>6.</strong> Adicione suas automações (WhatsApp, Sheets, etc.)</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end pt-6 border-t border-border">
+                        <Button onClick={saveN8nSettings} variant="accent">
+                          Salvar Configurações
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+
+            <Card className="shadow-soft">
+              <div className="p-6">
+                <h3 className="text-xl font-semibold mb-4">Exemplos de Automações</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <div className="bg-primary/5 p-4 rounded-lg">
+                    <h4 className="font-semibold text-primary mb-2">📱 WhatsApp</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Envie confirmações automáticas via WhatsApp Business API
+                    </p>
+                  </div>
+                  <div className="bg-secondary/5 p-4 rounded-lg">
+                    <h4 className="font-semibold text-secondary mb-2">📊 Google Sheets</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Salve todos os pedidos automaticamente em planilhas
+                    </p>
+                  </div>
+                  <div className="bg-accent/5 p-4 rounded-lg">
+                    <h4 className="font-semibold text-accent mb-2">💰 PIX</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Verifique pagamentos PIX automaticamente via API bancária
+                    </p>
+                  </div>
+                </div>
               </div>
             </Card>
           </div>
